@@ -1,0 +1,8 @@
+streamlit
+ultralytics
+opencv-python-headless
+google-generativeai
+streamlit-webrtc
+yt-dlp
+av
+numpy
