@@ -5,7 +5,8 @@
 
 import os, math
 from typing import Tuple, List
-import google.generativeai as genai
+from google import genai
+from google.genai.types import GenerateContentConfig
 import cv2
 import av
 import numpy as np
@@ -262,3 +263,4 @@ else:
         st.success("분석 완료")
         base = rule_based_report(fire_total, person_total, warn_any)
         st.markdown(generate_report_llm(fire_total, person_total, warn_any, base))
+
