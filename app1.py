@@ -10,7 +10,10 @@ import tempfile
 from PIL import Image
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 import queue # AI 리포트 생성을 위한 큐
-
+import streamlit as st
+# 호환 셔임: 구버전 webrtc가 st.experimental_rerun()을 부르는 경우를 대비
+if not hasattr(st, "experimental_rerun") and hasattr(st, "rerun"):
+    st.experimental_rerun = st.rerun
 # --- 페이지 기본 설정 ---
 st.set_page_config(
     page_title="AI 화재 및 인명 안전 시스템",
@@ -266,3 +269,4 @@ elif app_mode == "파일 업로드 및 분석":
                     if report:
 
                         st.text_area("AI 생성 리포트", report, height=300)
+
