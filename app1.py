@@ -16,7 +16,7 @@ st.set_page_config(
 
 # --- 앱 제목 ---
 st.title("🚨 AI 화재 및 인명 감지 시스템(CCTV용 모델)")
-st.markdown("---")
+st.markdown("웹캠으로 실시간으로 화재상황 감지하고 사람이 근처에 있을 시 경고 문구가 보이게 프로그래밍 되어 있습니다")
 
 # --- 사이드바 설정 ---
 st.sidebar.title("⚙️ 제어판")
