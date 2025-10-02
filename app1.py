@@ -1,5 +1,4 @@
 import streamlit as st
-import cv2
 import fire_detector
 import person_detector
 import google.generativeai as genai
@@ -253,4 +252,5 @@ elif app_mode == "파일 업로드 및 분석":
                     report = generate_report(max_fire, max_person, is_any_warning, report_frame)
                     if report:
                         st.text_area("AI 생성 리포트", report, height=300)
+
 
