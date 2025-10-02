@@ -162,8 +162,7 @@ if app_mode == "실시간 웹캠 감지":
         video_processor_factory=VideoTransformer,
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True,
-        # 프레임을 큐로 받아 처리하도록 설정
-        recv_queue_maxsize=2 
+        
     )
 
     if st.session_state.report_generated:
@@ -252,5 +251,6 @@ elif app_mode == "파일 업로드 및 분석":
                     report = generate_report(max_fire, max_person, is_any_warning, report_frame)
                     if report:
                         st.text_area("AI 생성 리포트", report, height=300)
+
 
 
