@@ -138,7 +138,7 @@ if app_mode == "실시간 웹캠 감지":
         st.session_state.report_text = ""
 
     # 웹캠 작동 문제 해결을 위한 디버깅 추가
-    class VideoTransformer(VideoTransformerBase):
+class VideoTransformer(VideoTransformerBase):
     def __init__(self):
         self.proximity_threshold = proximity_threshold
 
@@ -258,4 +258,5 @@ elif app_mode == "파일 업로드 및 분석":
                     report = generate_report(max_fire, max_person, is_any_warning, report_frame)
                     if report:
                         st.text_area("AI 생성 리포트", report, height=300)
+
 
