@@ -1,4 +1,4 @@
-import streamlit as st
+import gradio as gr
 import cv2
 import fire_detector
 import person_detector
@@ -6,59 +6,23 @@ import google.generativeai as genai
 import numpy as np
 import tempfile
 from PIL import Image
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
-import asyncio
+import os
 
-# --- 페이지 기본 설정 ---
-st.set_page_config(
-    page_title="AI 화재 및 인명 안전 시스템",
-    page_icon="🚨",
-    layout="wide",
-)
-
-# --- 앱 제목 ---
-st.title("🚨 AI 화재 및 인명 감지 시스템")
-st.markdown("이미지/동영상 파일을 업로드하거나 실시간 웹캠을 통해 화재 및 인명 위험을 감지하고 AI 리포트를 생성합니다.")
-
-# --- 사이드바 설정 ---
-st.sidebar.title("⚙️ 제어판")
-
-# Gemini API 키 입력
-st.sidebar.header("API 키 설정")
-try:
-    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except (KeyError, FileNotFoundError):
-    GOOGLE_API_KEY = st.sidebar.text_input(
-        "Google Gemini API 키를 입력하세요.", type="password", help="API 키가 없으면 리포트 생성이 불가합니다."
-    )
-
-# 작업 모드 선택
-app_mode = st.sidebar.selectbox(
-    "작업 모드를 선택하세요",
-    ["실시간 웹캠 감지", "파일 업로드 및 분석"]
-)
-st.sidebar.markdown("---")
-
-# --- 모델 로딩 ---
-@st.cache_resource
+# 모델 로딩 (기존과 동일, 캐싱 대신 앱 시작 시 로드)
 def load_models():
-    """AI 모델을 로드하는 함수 (캐싱하여 성능 최적화)"""
+    """AI 모델을 로드하는 함수"""
     try:
         fire_model = fire_detector.load_fire_model('fire2.pt')
         person_model = person_detector.load_person_model('yolov8n.pt')
         return fire_model, person_model
     except Exception as e:
-        st.error(f"모델 로딩 중 오류 발생: {e}")
-        return None, None
+        return None, None, f"모델 로딩 중 오류 발생: {e}"
 
-with st.spinner('AI 모델을 로딩 중입니다...'):
-    fire_model, person_model = load_models()
-
+fire_model, person_model, load_error = load_models()
 if fire_model is None or person_model is None:
-    st.error("AI 모델 로딩에 실패했습니다. GitHub에 .pt 파일들이 올바르게 업로드되었는지 확인해주세요.")
-    st.stop()
+    raise ValueError(load_error)
 
-# --- 공통 함수: 프레임 분석 및 시각화 ---
+# 공통 함수: 프레임 분석 및 시각화 (기존과 동일)
 def analyze_and_draw_on_frame(frame, proximity_threshold):
     """프레임 내에서 객체를 탐지하고 위험상황을 분석하여 시각화합니다."""
     fire_boxes = fire_detector.detect_fire(frame, fire_model)
@@ -88,14 +52,13 @@ def analyze_and_draw_on_frame(frame, proximity_threshold):
         
     return frame, len(fire_boxes), len(person_boxes), is_warning
 
-# --- 공통 함수: AI 리포트 생성 ---
-def generate_report(fire_count, person_count, is_warning, image_frame):
+# 공통 함수: AI 리포트 생성 (기존과 동일)
+def generate_report(fire_count, person_count, is_warning, image_frame, api_key):
     """탐지 결과를 바탕으로 Gemini AI 리포트를 생성합니다."""
-    if not GOOGLE_API_KEY:
-        st.error("Gemini API 키가 설정되지 않았습니다. 리포트를 생성할 수 없습니다.")
-        return None
+    if not api_key:
+        return "Gemini API 키가 설정되지 않았습니다. 리포트를 생성할 수 없습니다."
     try:
-        genai.configure(api_key=GOOGLE_API_KEY)
+        genai.configure(api_key=api_key)
         pil_image = Image.fromarray(cv2.cvtColor(image_frame, cv2.COLOR_BGR2RGB))
 
         # 사용자님이 선호하셨던 상세 프롬프트
@@ -119,140 +82,125 @@ def generate_report(fire_count, person_count, is_warning, image_frame):
         response = model.generate_content(prompt_parts)
         return response.text
     except Exception as e:
-        st.error(f"AI 리포트 생성 중 오류가 발생했습니다: {e}")
-        return None
+        return f"AI 리포트 생성 중 오류가 발생했습니다: {e}"
 
-# --- 모드 1: 실시간 웹캠 감지 ---
-if app_mode == "실시간 웹캠 감지":
-    st.header("실시간 웹캠 감지")
-    st.info("웹캠을 켜고 실시간으로 객체를 탐지합니다. 'START' 버튼을 눌러주세요.")
+# 웹캠 처리 함수
+def webcam_analysis(img, proximity_threshold, api_key, generate_report_flag):
+    if img is None:
+        return None, "웹캠 이미지를 캡처해주세요.", ""
     
-    proximity_threshold = st.slider(
-        "위험 근접 거리 설정 (px)", 50, 500, 150,
-        help="화재와 사람 사이의 거리가 이 값보다 가까우면 위험으로 판단합니다."
-    )
-
-    if 'report_generated' not in st.session_state:
-        st.session_state.report_generated = False
-    if 'report_text' not in st.session_state:
-        st.session_state.report_text = ""
-
-    class VideoTransformer(VideoTransformerBase):
-        def __init__(self):
-            self.proximity_threshold = proximity_threshold
-
-        def recv(self, frame):
-            if frame is None:
-                st.error("웹캠에서 프레임을 수신하지 못했습니다. 카메라 연결을 확인하세요.")
-                return None
-            st.write(f"프레임 수신 성공: {frame}")  # 디버깅용 로그
-            try:
-                frm = frame.to_ndarray(format="bgr24")
-                annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frm, self.proximity_threshold)
-                
-                if is_warning and not st.session_state.report_generated:
-                    report = generate_report(f_count, p_count, is_warning, annotated_frame)
-                    if report:
-                        st.session_state.report_text = report
-                        st.session_state.report_generated = True
-                
-                return annotated_frame
-            except Exception as e:
-                st.error(f"프레임 처리 중 오류 발생: {e}")
-                return None
-
-    webrtc_streamer(
-        key="webcam",
-        video_processor_factory=VideoTransformer,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-    )
-
-    if st.session_state.report_generated:
-        st.warning("🚨 위험 상황이 감지되었습니다! 아래 AI 리포트를 확인하세요.")
-        st.text_area("AI 생성 리포트", st.session_state.report_text, height=300)
-        if st.button("리포트 초기화 및 다시 감지"):
-            st.session_state.report_generated = False
-            st.session_state.report_text = ""
-            st.rerun()
-
-# --- 모드 2: 파일 업로드 및 분석 ---
-elif app_mode == "파일 업로드 및 분석":
-    st.header("파일 업로드 및 분석")
-    uploaded_file = st.file_uploader(
-        "이미지 또는 동영상 파일을 업로드하세요.",
-        type=["jpg", "jpeg", "png", "mp4", "mov", "avi"]
-    )
+    frame = np.array(img)
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frame, proximity_threshold)
+    result_img = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
     
-    if uploaded_file is not None:
-        file_type = uploaded_file.type.split('/')[0]
+    summary = f"🔥 탐지된 화재: {f_count} 건\n👨‍👩‍👧‍👦 탐지된 인원: {p_count} 명\n{'🚨 위험 상황 발생!' if is_warning else '✅ 위험 상황 없음.'}"
+    
+    report = ""
+    if generate_report_flag and is_warning:
+        report = generate_report(f_count, p_count, is_warning, annotated_frame, api_key)
+    
+    return result_img, summary, report
+
+# 파일 업로드 처리 함수 (이미지)
+def image_upload_analysis(uploaded_file, api_key, generate_report_flag):
+    if uploaded_file is None:
+        return None, "이미지 파일을 업로드해주세요.", ""
+    
+    image = Image.open(uploaded_file)
+    frame = np.array(image)
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frame, 150)
+    result_img = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+    
+    summary = f"🔥 탐지된 화재: {f_count} 건\n👨‍👩‍👧‍👦 탐지된 인원: {p_count} 명\n{'🚨 위험 상황 발생!' if is_warning else '✅ 위험 상황 없음.'}"
+    
+    report = ""
+    if generate_report_flag:
+        report = generate_report(f_count, p_count, is_warning, annotated_frame, api_key)
+    
+    return result_img, summary, report
+
+# 파일 업로드 처리 함수 (비디오)
+def video_upload_analysis(uploaded_file, api_key, generate_report_flag):
+    if uploaded_file is None:
+        return None, "비디오 파일을 업로드해주세요.", ""
+    
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(uploaded_file.read())
+    video_capture = cv2.VideoCapture(tfile.name)
+    
+    max_fire, max_person, is_any_warning = 0, 0, False
+    last_warn_frame = None
+    last_frame = None
+    
+    while video_capture.isOpened():
+        success, frame = video_capture.read()
+        if not success:
+            break
         
-        if file_type == "image":
-            image = Image.open(uploaded_file)
-            frame = np.array(image)
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        annotated_frame, f_count, p_count, warn = analyze_and_draw_on_frame(frame, 150)
+        last_frame = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+        
+        max_fire = max(max_fire, f_count)
+        max_person = max(max_person, p_count)
+        if warn:
+            is_any_warning = True
+            last_warn_frame = annotated_frame.copy()
+    
+    video_capture.release()
+    os.unlink(tfile.name)
+    
+    summary = f"🔥 최대 화재 수: {max_fire} 건\n👨‍👩‍👧‍👦 최대 인원 수: {max_person} 명\n{'🚨 위험 상황 발생!' if is_any_warning else '✅ 위험 상황 없음.'}"
+    
+    report = ""
+    if generate_report_flag:
+        report_frame = last_warn_frame if last_warn_frame is not None else last_frame
+        report = generate_report(max_fire, max_person, is_any_warning, report_frame, api_key)
+    
+    return last_frame, summary, report  # 마지막 프레임 반환 (전체 비디오 출력은 별도 고려 필요)
 
-            annotated_frame, f_count, p_count, warn = analyze_and_draw_on_frame(frame, 150)
+# Gradio 인터페이스
+with gr.Blocks(title="AI 화재 및 인명 안전 시스템") as demo:
+    gr.Markdown("# 🚨 AI 화재 및 인명 감지 시스템")
+    gr.Markdown("이미지/동영상 파일을 업로드하거나 실시간 웹캠을 통해 화재 및 인명 위험을 감지하고 AI 리포트를 생성합니다.")
+    
+    api_key = gr.Textbox(label="Google Gemini API 키 입력", type="password", placeholder="API 키를 입력하세요.")
+    
+    with gr.Tabs():
+        with gr.Tab("실시간 웹캠 감지"):
+            webcam_input = gr.Image(source="webcam", label="웹캠 입력 (실시간 캡처)")
+            proximity_threshold = gr.Slider(minimum=50, maximum=500, value=150, label="위험 근접 거리 설정 (px)")
+            generate_report_checkbox = gr.Checkbox(label="위험 시 AI 리포트 생성")
+            output_image = gr.Image(label="분석된 이미지")
+            summary_text = gr.Textbox(label="분석 결과")
+            report_text = gr.Textbox(label="AI 리포트")
             
-            st.image(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB), caption="분석된 이미지", use_container_width=True)
+            webcam_input.change(
+                fn=webcam_analysis,
+                inputs=[webcam_input, proximity_threshold, api_key, generate_report_checkbox],
+                outputs=[output_image, summary_text, report_text]
+            )
+        
+        with gr.Tab("파일 업로드 및 분석"):
+            file_upload = gr.File(label="이미지 또는 동영상 업로드 (jpg, png, mp4 등)")
+            generate_report_checkbox_upload = gr.Checkbox(label="AI 리포트 생성")
+            output_image_upload = gr.Image(label="분석된 이미지/마지막 프레임")
+            summary_text_upload = gr.Textbox(label="분석 결과")
+            report_text_upload = gr.Textbox(label="AI 리포트")
             
-            st.markdown("---")
-            st.subheader("📋 분석 결과")
-            st.write(f"🔥 탐지된 화재: **{f_count}** 건")
-            st.write(f"👨‍👩‍👧‍👦 탐지된 인원: **{p_count}** 명")
-            st.warning("🚨 위험 상황(화재 근접 인원) 발생!" if warn else "✅ 위험 상황 없음.")
+            def process_upload(file, api_key, generate_flag):
+                if file.name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    return image_upload_analysis(file, api_key, generate_flag)
+                elif file.name.lower().endswith(('.mp4', '.mov', '.avi')):
+                    return video_upload_analysis(file, api_key, generate_flag)
+                else:
+                    return None, "지원되지 않는 파일 형식입니다.", ""
             
-            if st.button("AI 안전 리포트 생성"):
-                with st.spinner("AI가 리포트를 작성 중입니다..."):
-                    report = generate_report(f_count, p_count, warn, annotated_frame)
-                    if report:
-                        st.text_area("AI 생성 리포트", report, height=300)
+            file_upload.change(
+                fn=process_upload,
+                inputs=[file_upload, api_key, generate_report_checkbox_upload],
+                outputs=[output_image_upload, summary_text_upload, report_text_upload]
+            )
 
-        elif file_type == "video":
-            tfile = tempfile.NamedTemporaryFile(delete=False) 
-            tfile.write(uploaded_file.read())
-            
-            video_capture = cv2.VideoCapture(tfile.name)
-            frame_placeholder = st.empty()
-            
-            total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
-            progress_bar = st.progress(0)
-            
-            max_fire, max_person, is_any_warning = 0, 0, False
-            last_warn_frame = None
-
-            for i in range(total_frames):
-                success, frame = video_capture.read()
-                if not success:
-                    break
-                
-                annotated_frame, f_count, p_count, warn = analyze_and_draw_on_frame(frame, 150)
-                
-                max_fire = max(max_fire, f_count)
-                max_person = max(max_person, p_count)
-                if warn: 
-                    is_any_warning = True
-                    last_warn_frame = annotated_frame.copy()
-
-                frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                frame_placeholder.image(frame_rgb, caption=f"동영상 분석 중... ({i+1}/{total_frames})", use_container_width=True)
-                progress_bar.progress((i + 1) / total_frames)
-
-            video_capture.release()
-            
-            st.success("동영상 분석이 완료되었습니다.")
-            st.markdown("---")
-            st.subheader("📋 전체 동영상 분석 요약")
-            st.write(f"🔥 탐지된 최대 화재 수: **{max_fire}** 건")
-            st.write(f"👨‍👩‍👧‍👦 탐지된 최대 인원 수: **{max_person}** 명")
-            st.warning("🚨 위험 상황(화재 근접 인원)이 한 번 이상 발생했습니다!" if is_any_warning else "✅ 전체 영상에서 위험 상황은 감지되지 않았습니다.")
-
-            if st.button("AI 안전 리포트 생성"):
-                report_frame = last_warn_frame if is_any_warning and last_warn_frame is not None else annotated_frame
-                with st.spinner("AI가 리포트를 작성 중입니다..."):
-                    report = generate_report(max_fire, max_person, is_any_warning, report_frame)
-                    if report:
-                        st.text_area("AI 생성 리포트", report, height=300)
-
-
-
+demo.launch()
