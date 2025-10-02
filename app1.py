@@ -1,256 +1,199 @@
+# app1.py
+import os
+import math
+from typing import Tuple, List
+
+import cv2
+import av
+import numpy as np
 import streamlit as st
+from streamlit_webrtc import webrtc_streamer, WebRtcMode
+
 import fire_detector
 import person_detector
-import google.generativeai as genai
-import numpy as np
-import tempfile
-from PIL import Image
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
-import asyncio # 비동기 처리를 위해 추가
 
-# --- 페이지 기본 설정 ---
-st.set_page_config(
-    page_title="AI 화재 및 인명 안전 시스템",
-    page_icon="🚨",
-    layout="wide",
-)
+st.set_page_config(page_title="실시간 화재/인명 감지", page_icon="🔥", layout="wide")
 
-# --- 앱 제목 ---
-st.title("🚨 AI 화재 및 인명 감지 시스템(CCTV용 모델)")
-st.markdown("웹캠으로 실시간으로 화재상황 감지하고 사람이 근처에 있을 시 경고 문구가 보이게 프로그래밍 되어 있습니다")
+# -----------------------------
+# 유틸
+# -----------------------------
+def abs_path(p: str) -> str:
+    return os.path.abspath(os.path.expanduser(p))
 
-# --- 사이드바 설정 ---
-st.sidebar.title("⚙️ 제어판")
+def iou_or_center_dist(a, b) -> float:
+    # 중심거리(px) 계산
+    ax = (a[0] + a[2]) / 2.0
+    ay = (a[1] + a[3]) / 2.0
+    bx = (b[0] + b[2]) / 2.0
+    by = (b[1] + b[3]) / 2.0
+    return math.hypot(ax - bx, ay - by)
 
-# Gemini API 키 입력
-st.sidebar.header("API 키 설정")
-try:
-    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-except (KeyError, FileNotFoundError):
-    GOOGLE_API_KEY = st.sidebar.text_input(
-        "Google Gemini API 키를 입력하세요.", type="password", help="API 키가 없으면 리포트 생성이 불가합니다."
-    )
+# -----------------------------
+# 규칙 기반 리포트 (과장 금지)
+# -----------------------------
+def rule_based_report(fire_count: int, person_count: int, warning: bool) -> str:
+    if fire_count == 0 and person_count == 0:
+        risk = "안전"
+        summary = "화재와 사람 모두 탐지되지 않았습니다."
+        action = "별도 조치 필요 없습니다."
+    elif fire_count > 0 and person_count == 0:
+        risk = "주의"
+        summary = "작은 불이 탐지되었지만 주변에 사람은 없습니다."
+        action = "상황을 관찰하세요. 불이 확산되거나 연기가 많아지면 진화 조치를 고려하세요."
+    elif fire_count > 0 and person_count > 0 and not warning:
+        risk = "주의"
+        summary = "불이 있으나 사람은 안전거리에서 관찰 중입니다."
+        action = "안전거리를 유지하고 소화기 등 대비 상태를 확인하세요."
+    else:
+        # fire>0, person>0, warning True
+        risk = "경고"
+        summary = "불 근처에서 사람이 감지되었습니다."
+        action = "즉시 안전거리를 확보하고 필요 시 소화/대피를 안내하세요."
+    return f"""[상황 요약]
+- 화재: {fire_count}건 / 인원: {person_count}명 / 근접 경고: {'발생' if warning else '없음'}
 
-# 작업 모드 선택
-app_mode = st.sidebar.selectbox(
-    "작업 모드를 선택하세요",
-    ["실시간 웹캠 감지", "파일 업로드 및 분석"]
-)
-st.sidebar.markdown("---")
+[위험 평가] {risk}
+{summary}
 
-# --- 모델 로딩 ---
+[권장 조치]
+- {action}
+"""
+
+# -----------------------------
+# 모델 로드 (캐시)
+# -----------------------------
 @st.cache_resource
-def load_models():
-    """AI 모델을 로드하는 함수 (캐싱하여 성능 최적화)"""
-    fire_model = fire_detector.load_fire_model('fire2.pt')
-    person_model = person_detector.load_person_model('yolov8n.pt')
+def load_models(fire_pt_path: str, person_pt_path: str):
+    fire_model = fire_detector.load_fire_model(fire_pt_path)
+    person_model = person_detector.load_person_model(person_pt_path)
     return fire_model, person_model
 
-with st.spinner('AI 모델을 로딩 중입니다...'):
-    fire_model, person_model = load_models()
+# -----------------------------
+# 한 프레임 분석 및 그리기
+# -----------------------------
+def analyze_and_draw(
+    frame_bgr: np.ndarray,
+    fire_model,
+    person_model,
+    proximity_px: int = 150
+) -> Tuple[np.ndarray, int, int, bool]:
+    """프레임을 받아 탐지/표시/경고여부 반환"""
+    # 탐지
+    fire_boxes: List[List[int]] = fire_detector.detect_fire(frame_bgr, fire_model) or []
+    person_boxes: List[List[int]] = person_detector.detect_person(frame_bgr, person_model) or []
 
-if fire_model is None or person_model is None:
-    st.error("AI 모델 로딩에 실패했습니다. .pt 파일들을 확인해주세요.")
+    # 경고 판정(최소 중심거리)
+    warning = False
+    for fb in fire_boxes:
+        for pb in person_boxes:
+            if iou_or_center_dist(fb, pb) <= proximity_px:
+                warning = True
+                break
+        if warning:
+            break
+
+    # 그리기
+    annotated = frame_bgr.copy()
+    for (x1, y1, x2, y2) in fire_boxes:
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        cv2.putText(annotated, "FIRE", (x1, max(0, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    for (x1, y1, x2, y2) in person_boxes:
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 200, 0), 2)
+        cv2.putText(annotated, "PERSON", (x1, max(0, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
+
+    # 경고 표시
+    if warning:
+        h, w = annotated.shape[:2]
+        cv2.rectangle(annotated, (0, 0), (w, 36), (0, 0, 255), -1)
+        cv2.putText(annotated, "WARNING: PERSON NEAR FIRE",
+                    (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+    return annotated, len(fire_boxes), len(person_boxes), warning
+
+# -----------------------------
+# UI
+# -----------------------------
+st.title("🔥 실시간 화재/인명 감지")
+
+# 사이드바: 모델 경로/옵션
+with st.sidebar:
+    st.header("모델 설정")
+    fire_pt_rel = st.text_input("화재 모델(.pt) 경로", value="fire2.pt")
+    person_pt_rel = st.text_input("사람 모델(.pt) 경로", value="yolov8n.pt")  # YOLOv8 예시
+    proximity_px = st.slider("위험 근접 거리(px)", 50, 500, 150)
+    st.caption("화재/사람 중심거리(px)가 이 값보다 가까우면 '경고'로 표시합니다.")
+
+# 절대경로 변환
+fire_pt = abs_path(fire_pt_rel)
+person_pt = abs_path(person_pt_rel)
+
+# 모델 로드
+try:
+    with st.spinner("AI 모델 로딩 중..."):
+        fire_model, person_model = load_models(fire_pt, person_pt)
+    st.success("모델 로딩 완료 ✅")
+except Exception as e:
+    st.error("AI 모델 로딩 실패 ❌ .pt 경로나 환경을 확인하세요.")
+    st.exception(e)
     st.stop()
 
-# --- 공통 함수: 프레임 분석 및 시각화 ---
-def analyze_and_draw_on_frame(frame, proximity_threshold):
-    """프레임 내에서 객체를 탐지하고 위험상황을 분석하여 시각화합니다."""
-    fire_boxes = fire_detector.detect_fire(frame, fire_model)
-    person_boxes = person_detector.detect_person(frame, person_model)
-    is_warning = False
+st.divider()
+st.subheader("웹캠")
 
-    if fire_boxes:
-        for f_box in fire_boxes:
-            cv2.rectangle(frame, (f_box[0], f_box[1]), (f_box[2], f_box[3]), (0, 0, 255), 3)
-            cv2.putText(frame, 'Fire', (f_box[0], f_box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-            for p_box in person_boxes:
-                fire_center_x = f_box[0] + (f_box[2] - f_box[0]) / 2
-                person_center_x = p_box[0] + (p_box[2] - p_box[0]) / 2
-                if abs(fire_center_x - person_center_x) < proximity_threshold:
-                    is_warning = True
-                    cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (0, 165, 255), 4)
-                else:
-                    cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (255, 0, 0), 2)
-                cv2.putText(frame, 'Person', (p_box[0], p_box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-    else:
-        for p_box in person_boxes:
-            cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (255, 0, 0), 2)
-            cv2.putText(frame, 'Person', (p_box[0], p_box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+# 리포트 상태
+if "report_text" not in st.session_state:
+    st.session_state.report_text = ""
+if "report_done" not in st.session_state:
+    st.session_state.report_done = False
 
-    if is_warning:
-        cv2.putText(frame, "WARNING: Person Near Fire!", (50, 60), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (0, 255, 255), 3)
-        
-    return frame, len(fire_boxes), len(person_boxes), is_warning
+# 최신 탐지 요약(사이드)
+status_fire = st.empty()
+status_person = st.empty()
+status_warn = st.empty()
 
-# --- 공통 함수: AI 리포트 생성 ---
-def generate_report(fire_count, person_count, is_warning, image_frame):
-    """탐지 결과를 바탕으로 Gemini AI 리포트를 생성합니다."""
-    if not GOOGLE_API_KEY:
-        st.error("Gemini API 키가 설정되지 않았습니다. 리포트를 생성할 수 없습니다.")
-        return None
-    try:
-        genai.configure(api_key=GOOGLE_API_KEY)
-        pil_image = Image.fromarray(cv2.cvtColor(image_frame, cv2.COLOR_BGR2RGB))
+# ---- WebRTC 콜백 ----
+def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+    frm = frame.to_ndarray(format="bgr24")
+    frm = cv2.flip(frm, 1)
 
-        prompt_parts = [
-            pil_image,
-            "당신은 CCTV 이미지를 분석하는 AI 안전 전문가입니다.",
-            "\n## 지시사항",
-            "첨부된 이미지와 아래 요약 데이터를 바탕으로 상황을 분석하고 안전 리포트를 작성하세요.",
-            "\n## 분석 데이터",
-            f"- 화재 객체 수: {fire_count}",
-            f"- 사람 객체 수: {person_count}",
-            f"- 위험 경고 (사람-화재 근접): {'발생' if is_warning else '없음'}",
-            "\n## 분석 가이드라인",
-            "1. **[상황 맥락 파악]** 이미지 속 불이 통제된 상황(예: 드럼통 안의 모닥불, 캠프파이어)인지, 통제되지 않은 위험한 화재(예: 건물 화재, 산불)인지 먼저 판단하세요.",
-            "2. **[위험도 평가]** 위 맥락에 따라 위험도를 '안전', '주의', '경고', '심각' 4단계로 평가하고, 그 이유를 구체적으로 설명하세요.",
-            "3. **[권장 조치]** 평가된 위험도에 맞는 현실적인 조치를 1~2가지 제안하세요. '경고' 또는 '심각' 단계일 경우 구체적인 대피 요령을 포함하세요.",
-            "\n위 가이드라인에 따라 리포트를 생성해주세요."
-        ]
-        
-        # --- [수정 1] 사용자 요청 모델명으로 변경 ---
-        model = genai.GenerativeModel('gemini-2.5-flash') # gemini-2.5-flash -> gemini-pro (or 1.5 flash)
-        response = model.generate_content(prompt_parts)
-        return response.text
-    except Exception as e:
-        st.error(f"AI 리포트 생성 중 오류가 발생했습니다: {e}")
-        return None
-
-# --- 모드 1: 실시간 웹캠 감지 ---
-if app_mode == "실시간 웹캠 감지":
-    st.header("실시간 웹캠 감지")
-    st.info("웹캠을 켜고 실시간으로 객체를 탐지합니다. 'START' 버튼을 눌러주세요.")
-    
-    proximity_threshold = st.slider(
-        "위험 근접 거리 설정 (px)", 50, 500, 150,
-        help="화재와 사람 사이의 거리가 이 값보다 가까우면 위험으로 판단합니다."
+    annotated, f_cnt, p_cnt, warn = analyze_and_draw(
+        frm, fire_model, person_model, proximity_px
     )
 
-    # 리포트 상태 관리를 위한 session_state 초기화
-    if 'report_generated' not in st.session_state:
-        st.session_state.report_generated = False
-    if 'report_text' not in st.session_state:
+    # 사이드 상태 갱신
+    status_fire.metric("탐지된 화재", f_cnt)
+    status_person.metric("탐지된 인원", p_cnt)
+    status_warn.metric("근접 경고", "발생" if warn else "없음")
+
+    # 경고 처음 발생 시 리포트 1회 생성(규칙 기반, 과장 금지)
+    if warn and not st.session_state.report_done:
+        st.session_state.report_text = rule_based_report(f_cnt, p_cnt, warn)
+        st.session_state.report_done = True
+
+    return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+
+# ---- WebRTC 실행 ----
+webrtc_streamer(
+    key="webcam",
+    mode=WebRtcMode.SENDRECV,
+    video_frame_callback=video_frame_callback,
+    media_stream_constraints={"video": True, "audio": False},
+    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+    async_processing=True,
+)
+
+# 리포트 표시
+if st.session_state.report_done and st.session_state.report_text:
+    st.warning("🚨 위험 상황이 감지되었습니다. 아래 리포트를 확인하세요.")
+    st.text_area("현장 리포트(간결, 과장 금지)", st.session_state.report_text, height=250)
+    cols = st.columns(2)
+    if cols[0].button("리포트 초기화"):
         st.session_state.report_text = ""
-
-    # --- [수정 2] 웹캠 멈춤 현상 개선 ---
-    class VideoTransformer(VideoTransformerBase):
-        def __init__(self):
-            self.proximity_threshold = proximity_threshold
-
-        async def recv_queued(self, frames):
-            # 큐에 쌓인 프레임 중 가장 최신 프레임만 처리 (처리 지연 방지)
-            frm = frames[-1].to_ndarray(format="bgr24")
-            
-            # 비동기적으로 객체 탐지 실행
-            annotated_frame, f_count, p_count, is_warning = await asyncio.to_thread(
-                analyze_and_draw_on_frame, frm, self.proximity_threshold
-            )
-            
-            if is_warning and not st.session_state.report_generated:
-                report = await asyncio.to_thread(
-                    generate_report, f_count, p_count, is_warning, annotated_frame
-                )
-                if report:
-                    st.session_state.report_text = report
-                    st.session_state.report_generated = True
-            
-            return [annotated_frame]
-
-    webrtc_streamer(
-        key="webcam",
-        video_processor_factory=VideoTransformer,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-        
-    )
-
-    if st.session_state.report_generated:
-        st.warning("🚨 위험 상황이 감지되었습니다! 아래 AI 리포트를 확인하세요.")
-        st.text_area("AI 생성 리포트", st.session_state.report_text, height=300)
-        if st.button("리포트 초기화 및 다시 감지"):
-            st.session_state.report_generated = False
-            st.session_state.report_text = ""
-            st.rerun()
-
-# --- 모드 2: 파일 업로드 및 분석 ---
-elif app_mode == "파일 업로드 및 분석":
-    # (이하 코드는 변경 없음)
-    st.header("파일 업로드 및 분석")
-    uploaded_file = st.file_uploader(
-        "이미지 또는 동영상 파일을 업로드하세요.",
-        type=["jpg", "jpeg", "png", "mp4", "mov", "avi"]
-    )
-    
-    if uploaded_file is not None:
-        file_type = uploaded_file.type.split('/')[0]
-        
-        if file_type == "image":
-            image = Image.open(uploaded_file)
-            frame = np.array(image)
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
-            annotated_frame, f_count, p_count, warn = analyze_and_draw_on_frame(frame, 150)
-            
-            st.image(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB), caption="분석된 이미지", use_container_width=True)
-            
-            st.markdown("---")
-            st.subheader("📋 분석 결과")
-            st.write(f"🔥 탐지된 화재: **{f_count}** 건")
-            st.write(f"👨‍👩‍👧‍👦 탐지된 인원: **{p_count}** 명")
-            st.warning("🚨 위험 상황(화재 근접 인원) 발생!" if warn else "✅ 위험 상황 없음.")
-            
-            if st.button("AI 안전 리포트 생성"):
-                with st.spinner("AI가 리포트를 작성 중입니다..."):
-                    report = generate_report(f_count, p_count, warn, annotated_frame)
-                    if report:
-                        st.text_area("AI 생성 리포트", report, height=300)
-
-        elif file_type == "video":
-            tfile = tempfile.NamedTemporaryFile(delete=False) 
-            tfile.write(uploaded_file.read())
-            
-            video_capture = cv2.VideoCapture(tfile.name)
-            frame_placeholder = st.empty()
-            
-            total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
-            progress_bar = st.progress(0)
-            
-            max_fire, max_person, is_any_warning = 0, 0, False
-            last_warn_frame = None
-
-            for i in range(total_frames):
-                success, frame = video_capture.read()
-                if not success:
-                    break
-                
-                annotated_frame, f_count, p_count, warn = analyze_and_draw_on_frame(frame, 150)
-                
-                max_fire = max(max_fire, f_count)
-                max_person = max(max_person, p_count)
-                if warn: 
-                    is_any_warning = True
-                    last_warn_frame = annotated_frame.copy()
-
-                frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                frame_placeholder.image(frame_rgb, caption=f"동영상 분석 중... ({i+1}/{total_frames})", use_container_width=True)
-                progress_bar.progress((i + 1) / total_frames)
-
-            video_capture.release()
-            
-            st.success("동영상 분석이 완료되었습니다.")
-            st.markdown("---")
-            st.subheader("📋 전체 동영상 분석 요약")
-            st.write(f"🔥 탐지된 최대 화재 수: **{max_fire}** 건")
-            st.write(f"👨‍👩‍👧‍👦 탐지된 최대 인원 수: **{max_person}** 명")
-            st.warning("🚨 위험 상황(화재 근접 인원)이 한 번 이상 발생했습니다!" if is_any_warning else "✅ 전체 영상에서 위험 상황은 감지되지 않았습니다.")
-
-            if st.button("AI 안전 리포트 생성"):
-                report_frame = last_warn_frame if is_any_warning and last_warn_frame is not None else annotated_frame
-                with st.spinner("AI가 리포트를 작성 중입니다..."):
-                    report = generate_report(max_fire, max_person, is_any_warning, report_frame)
-                    if report:
-                        st.text_area("AI 생성 리포트", report, height=300)
-
-
-
+        st.session_state.report_done = False
+        st.rerun()
+    if cols[1].button("근접 임계값 +20px"):
+        # 상황에 따라 민감도 조절
+        proximity_px_new = min(500, proximity_px + 20)
+        st.toast(f"근접 임계값을 {proximity_px} → {proximity_px_new}px 로 높였습니다.")
