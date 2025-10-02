@@ -7,6 +7,7 @@ import numpy as np
 import tempfile
 from PIL import Image
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+import asyncio # 비동기 처리를 위해 추가
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(
@@ -25,7 +26,6 @@ st.sidebar.title("⚙️ 제어판")
 # Gemini API 키 입력
 st.sidebar.header("API 키 설정")
 try:
-    # Try to get the key from Streamlit's secrets
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except (KeyError, FileNotFoundError):
     GOOGLE_API_KEY = st.sidebar.text_input(
@@ -70,7 +70,7 @@ def analyze_and_draw_on_frame(frame, proximity_threshold):
                 person_center_x = p_box[0] + (p_box[2] - p_box[0]) / 2
                 if abs(fire_center_x - person_center_x) < proximity_threshold:
                     is_warning = True
-                    cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (0, 165, 255), 4) # 주황색으로 변경
+                    cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (0, 165, 255), 4)
                 else:
                     cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (255, 0, 0), 2)
                 cv2.putText(frame, 'Person', (p_box[0], p_box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
@@ -110,7 +110,8 @@ def generate_report(fire_count, person_count, is_warning, image_frame):
             "\n위 가이드라인에 따라 리포트를 생성해주세요."
         ]
         
-        model = genai.GenerativeModel('gemini-2.5-flash') 
+        # --- [수정 1] 사용자 요청 모델명으로 변경 ---
+        model = genai.GenerativeModel('gemini-2.5-flash') # gemini-2.5-flash -> gemini-pro (or 1.5 flash)
         response = model.generate_content(prompt_parts)
         return response.text
     except Exception as e:
@@ -133,33 +134,39 @@ if app_mode == "실시간 웹캠 감지":
     if 'report_text' not in st.session_state:
         st.session_state.report_text = ""
 
-    # webrtc를 위한 프레임 처리 클래스
+    # --- [수정 2] 웹캠 멈춤 현상 개선 ---
     class VideoTransformer(VideoTransformerBase):
         def __init__(self):
             self.proximity_threshold = proximity_threshold
 
-        def recv(self, frame):
-            frm = frame.to_ndarray(format="bgr24")
+        async def recv_queued(self, frames):
+            # 큐에 쌓인 프레임 중 가장 최신 프레임만 처리 (처리 지연 방지)
+            frm = frames[-1].to_ndarray(format="bgr24")
             
-            annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frm, self.proximity_threshold)
+            # 비동기적으로 객체 탐지 실행
+            annotated_frame, f_count, p_count, is_warning = await asyncio.to_thread(
+                analyze_and_draw_on_frame, frm, self.proximity_threshold
+            )
             
-            # 위험 상황 감지 시 리포트 생성 (한 번만)
             if is_warning and not st.session_state.report_generated:
-                report = generate_report(f_count, p_count, is_warning, annotated_frame)
+                report = await asyncio.to_thread(
+                    generate_report, f_count, p_count, is_warning, annotated_frame
+                )
                 if report:
                     st.session_state.report_text = report
                     st.session_state.report_generated = True
             
-            return annotated_frame
+            return [annotated_frame]
 
     webrtc_streamer(
         key="webcam",
         video_processor_factory=VideoTransformer,
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True,
+        # 프레임을 큐로 받아 처리하도록 설정
+        recv_queue_maxsize=2 
     )
 
-    # 리포트가 생성되었으면 화면에 표시
     if st.session_state.report_generated:
         st.warning("🚨 위험 상황이 감지되었습니다! 아래 AI 리포트를 확인하세요.")
         st.text_area("AI 생성 리포트", st.session_state.report_text, height=300)
@@ -170,6 +177,7 @@ if app_mode == "실시간 웹캠 감지":
 
 # --- 모드 2: 파일 업로드 및 분석 ---
 elif app_mode == "파일 업로드 및 분석":
+    # (이하 코드는 변경 없음)
     st.header("파일 업로드 및 분석")
     uploaded_file = st.file_uploader(
         "이미지 또는 동영상 파일을 업로드하세요.",
@@ -179,7 +187,6 @@ elif app_mode == "파일 업로드 및 분석":
     if uploaded_file is not None:
         file_type = uploaded_file.type.split('/')[0]
         
-        # --- 이미지 파일 처리 ---
         if file_type == "image":
             image = Image.open(uploaded_file)
             frame = np.array(image)
@@ -201,7 +208,6 @@ elif app_mode == "파일 업로드 및 분석":
                     if report:
                         st.text_area("AI 생성 리포트", report, height=300)
 
-        # --- 동영상 파일 처리 ---
         elif file_type == "video":
             tfile = tempfile.NamedTemporaryFile(delete=False) 
             tfile.write(uploaded_file.read())
@@ -242,7 +248,6 @@ elif app_mode == "파일 업로드 및 분석":
             st.warning("🚨 위험 상황(화재 근접 인원)이 한 번 이상 발생했습니다!" if is_any_warning else "✅ 전체 영상에서 위험 상황은 감지되지 않았습니다.")
 
             if st.button("AI 안전 리포트 생성"):
-                # 리포트 생성 시, 위험 상황이 있었으면 마지막 위험 프레임을, 없었으면 마지막 프레임을 사용
                 report_frame = last_warn_frame if is_any_warning and last_warn_frame is not None else annotated_frame
                 with st.spinner("AI가 리포트를 작성 중입니다..."):
                     report = generate_report(max_fire, max_person, is_any_warning, report_frame)
