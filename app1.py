@@ -139,27 +139,28 @@ if app_mode == "실시간 웹캠 감지":
 
     # 웹캠 작동 문제 해결을 위한 디버깅 추가
     class VideoTransformer(VideoTransformerBase):
-        def __init__(self):
-            self.proximity_threshold = proximity_threshold
+    def __init__(self):
+        self.proximity_threshold = proximity_threshold
 
-        def recv(self, frame):
-            if frame is None:  # 프레임이 None일 경우 오류 처리
-                st.error("웹캠에서 프레임을 수신하지 못했습니다. 카메라 권한을 확인하세요.")
-                return None
-            try:
-                frm = frame.to_ndarray(format="bgr24")
-                annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frm, self.proximity_threshold)
-                
-                if is_warning and not st.session_state.report_generated:
-                    report = generate_report(f_count, p_count, is_warning, annotated_frame)
-                    if report:
-                        st.session_state.report_text = report
-                        st.session_state.report_generated = True
-                
-                return annotated_frame
-            except Exception as e:
-                st.error(f"프레임 처리 중 오류 발생: {e}")
-                return None
+    def recv(self, frame):
+        if frame is None:
+            st.error("웹캠에서 프레임을 수신하지 못했습니다. 카메라 연결을 확인하세요.")
+            return None
+        st.write(f"프레임 수신 성공: {frame}")  # 디버깅용 로그
+        try:
+            frm = frame.to_ndarray(format="bgr24")
+            annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frm, self.proximity_threshold)
+            
+            if is_warning and not st.session_state.report_generated:
+                report = generate_report(f_count, p_count, is_warning, annotated_frame)
+                if report:
+                    st.session_state.report_text = report
+                    st.session_state.report_generated = True
+            
+            return annotated_frame
+        except Exception as e:
+            st.error(f"프레임 처리 중 오류 발생: {e}")
+            return None
 
     # asyncio 이벤트 루프 초기화 추가 (웹캠 작동 문제 해결 시도)
     loop = asyncio.new_event_loop()
@@ -170,7 +171,7 @@ if app_mode == "실시간 웹캠 감지":
         video_processor_factory=VideoTransformer,
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True,
-    )
+)
 
     if st.session_state.report_generated:
         st.warning("🚨 위험 상황이 감지되었습니다! 아래 AI 리포트를 확인하세요.")
@@ -257,3 +258,4 @@ elif app_mode == "파일 업로드 및 분석":
                     report = generate_report(max_fire, max_person, is_any_warning, report_frame)
                     if report:
                         st.text_area("AI 생성 리포트", report, height=300)
+
