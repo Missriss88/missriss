@@ -5,3 +5,4 @@ google-generativeai
 numpy
 Pillow
 streamlit-webrtc
+av
