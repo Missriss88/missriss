@@ -110,7 +110,7 @@ def generate_report(fire_count, person_count, is_warning, image_frame):
             "\n위 가이드라인에 따라 리포트를 생성해주세요."
         ]
         
-        model = genai.GenerativeModel('gemini-1.5-flash-latest') 
+        model = genai.GenerativeModel('gemini-2.5-flash') 
         response = model.generate_content(prompt_parts)
         return response.text
     except Exception as e:
@@ -248,3 +248,4 @@ elif app_mode == "파일 업로드 및 분석":
                     report = generate_report(max_fire, max_person, is_any_warning, report_frame)
                     if report:
                         st.text_area("AI 생성 리포트", report, height=300)
+
