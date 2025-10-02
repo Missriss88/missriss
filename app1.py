@@ -8,14 +8,19 @@ import tempfile
 from PIL import Image
 import os
 
-# 모델 로딩 (기존과 동일, 캐싱 대신 앱 시작 시 로드)
+# 모델 로딩
 def load_models():
     """AI 모델을 로드하는 함수"""
     try:
-        fire_model = fire_detector.load_fire_model('fire2.pt')
-        person_model = person_detector.load_person_model('yolov8n.pt')
-        return fire_model, person_model
+        print("모델 로딩 시도 중...")
+        current_dir = os.path.dirname(__file__)
+        fire_model = fire_detector.load_fire_model(os.path.join(current_dir, 'fire2.pt'))
+        print("화재 모델 로드 성공")
+        person_model = person_detector.load_person_model(os.path.join(current_dir, 'yolov8n.pt'))
+        print("인물 모델 로드 성공")
+        return fire_model, person_model, None
     except Exception as e:
+        print(f"모델 로딩 실패: {e}")
         return None, None, f"모델 로딩 중 오류 발생: {e}"
 
 fire_model, person_model, load_error = load_models()
@@ -61,7 +66,6 @@ def generate_report(fire_count, person_count, is_warning, image_frame, api_key):
         genai.configure(api_key=api_key)
         pil_image = Image.fromarray(cv2.cvtColor(image_frame, cv2.COLOR_BGR2RGB))
 
-        # 사용자님이 선호하셨던 상세 프롬프트
         prompt_parts = [
             pil_image,
             "당신은 CCTV 이미지를 분석하는 AI 안전 전문가입니다.",
@@ -158,11 +162,11 @@ def video_upload_analysis(uploaded_file, api_key, generate_report_flag):
         report_frame = last_warn_frame if last_warn_frame is not None else last_frame
         report = generate_report(max_fire, max_person, is_any_warning, report_frame, api_key)
     
-    return last_frame, summary, report  # 마지막 프레임 반환 (전체 비디오 출력은 별도 고려 필요)
+    return last_frame, summary, report
 
 # Gradio 인터페이스
 with gr.Blocks(title="AI 화재 및 인명 안전 시스템") as demo:
-    gr.Markdown("# 🚨 AI 화재 및 인명 감지 시스템")
+    gr.Markdown("# 🚨 AI 화재 및 인명 안전 시스템")
     gr.Markdown("이미지/동영상 파일을 업로드하거나 실시간 웹캠을 통해 화재 및 인명 위험을 감지하고 AI 리포트를 생성합니다.")
     
     api_key = gr.Textbox(label="Google Gemini API 키 입력", type="password", placeholder="API 키를 입력하세요.")
