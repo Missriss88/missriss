@@ -36,7 +36,6 @@ fire_model, person_model = load_models()
 
 # Google API 키 로드 및 Gemini 설정
 try:
-    secrets = toml.load("secret.toml")
     GOOGLE_API_KEY = secrets.get("GOOGLE_API_KEY")
     if not GOOGLE_API_KEY:
         st.error("secret.toml 파일에서 Google API 키를 찾을 수 없습니다.")
@@ -224,3 +223,4 @@ else:
         if st.button("리포트 초기화"):
             st.session_state.ai_report = ""
             st.rerun()
+
