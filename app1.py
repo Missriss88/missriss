@@ -6,7 +6,7 @@ import google.generativeai as genai
 import numpy as np
 import tempfile
 from PIL import Image
-
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 # --- 페이지 기본 설정 ---
 st.set_page_config(
     page_title="AI 화재 및 인명 안전 시스템",
@@ -124,36 +124,38 @@ def generate_report(fire_count, person_count, is_warning, image_frame):
         return None
 
 # --- 모드 1: 실시간 웹캠 감지 ---
+
+
 if app_mode == "실시간 웹캠 감지":
     st.header("실시간 웹캠 감지")
-    run_webcam = st.toggle("웹캠 실행", value=True)
+    st.info("웹캠을 켜고 실시간으로 객체를 탐지합니다. 'START' 버튼을 눌러주세요.")
+    
     proximity_threshold = st.slider(
-        "위험 근접 거리 설정 (px)", 50, 500, 150, 
+        "위험 근접 거리 설정 (px)", 50, 500, 150,
         help="화재와 사람 사이의 거리가 이 값보다 가까우면 위험으로 판단합니다."
     )
-    
-    # --- UI 플레이스홀더 추가 ---
-    frame_placeholder = st.empty()
-    report_placeholder = st.empty() # AI 리포트를 표시할 공간
 
-    if run_webcam:
-        video_capture = cv2.VideoCapture(0)
-        
-        # --- 리포트 중복 생성을 막기 위한 상태 변수 ---
-        report_generated = False 
+    # webrtc를 위한 프레임 처리 클래스
+    class VideoTransformer(VideoTransformerBase):
+        def __init__(self):
+            self.proximity_threshold = proximity_threshold
 
-        while video_capture.isOpened():
-            success, frame = video_capture.read()
-            if not success:
-                st.error("웹캠을 열 수 없습니다.")
-                break
+        def recv(self, frame):
+            # 프레임을 numpy array로 변환
+            frm = frame.to_ndarray(format="bgr24")
             
-            # 프레임 분석 및 결과 가져오기
-            annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frame, proximity_threshold)
+            # 객체 탐지 및 프레임에 그리기
+            annotated_frame, _, _, _ = analyze_and_draw_on_frame(frm, self.proximity_threshold)
             
-            # 화면 업데이트
-            frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-            frame_placeholder.image(frame_rgb, caption="실시간 감지 중...",  use_container_width=True)
+            return annotated_frame
+
+    # streamlit-webrtc 위젯 실행
+    webrtc_streamer(
+        key="example",
+        video_processor_factory=VideoTransformer,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
             
             # --- AI 리포트 생성 로직 (핵심 수정 부분) ---
             # 위험 상황이 발생했고, 아직 리포트가 생성되지 않았다면
@@ -245,3 +247,4 @@ elif app_mode == "파일 업로드 및 분석":
                     report = generate_report(max_fire, max_person, is_any_warning, annotated_frame)
                     if report:
                         st.text_area("AI 생성 리포트", report, height=300)
+
