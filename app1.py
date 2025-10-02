@@ -7,6 +7,11 @@ import cv2
 import av
 import numpy as np
 import streamlit as st
+# --- Streamlit <-> streamlit-webrtc 버전 호환 셔임 ---
+# webrtc가 내부에서 st.experimental_rerun()을 호출하는 구버전일 때 대비
+if not hasattr(st, "experimental_rerun") and hasattr(st, "rerun"):
+    st.experimental_rerun = st.rerun
+
 from streamlit_webrtc import webrtc_streamer, WebRtcMode
 
 import fire_detector
@@ -15,13 +20,16 @@ import person_detector
 st.set_page_config(page_title="실시간 화재/인명 감지", page_icon="🔥", layout="wide")
 
 # -----------------------------
+# (고정) 모델 경로: 필요 시 아래 두 줄만 수정
+# -----------------------------
+FIRE_PT   = os.path.abspath("fire2.pt")     # 예: ./fire2.pt
+PERSON_PT = os.path.abspath("yolov8n.pt")   # 예: ./yolov8n.pt  (YOLOv5를 쓰면 yolov5s.pt로)
+PROXIMITY_PX = 150                          # 화재-사람 중심거리 임계값(px)
+
+# -----------------------------
 # 유틸
 # -----------------------------
-def abs_path(p: str) -> str:
-    return os.path.abspath(os.path.expanduser(p))
-
 def iou_or_center_dist(a, b) -> float:
-    # 중심거리(px) 계산
     ax = (a[0] + a[2]) / 2.0
     ay = (a[1] + a[3]) / 2.0
     bx = (b[0] + b[2]) / 2.0
@@ -39,13 +47,12 @@ def rule_based_report(fire_count: int, person_count: int, warning: bool) -> str:
     elif fire_count > 0 and person_count == 0:
         risk = "주의"
         summary = "작은 불이 탐지되었지만 주변에 사람은 없습니다."
-        action = "상황을 관찰하세요. 불이 확산되거나 연기가 많아지면 진화 조치를 고려하세요."
+        action = "상황을 관찰하세요. 확산/연기 증가 시 진화 조치를 고려하세요."
     elif fire_count > 0 and person_count > 0 and not warning:
         risk = "주의"
         summary = "불이 있으나 사람은 안전거리에서 관찰 중입니다."
         action = "안전거리를 유지하고 소화기 등 대비 상태를 확인하세요."
     else:
-        # fire>0, person>0, warning True
         risk = "경고"
         summary = "불 근처에서 사람이 감지되었습니다."
         action = "즉시 안전거리를 확보하고 필요 시 소화/대피를 안내하세요."
@@ -75,9 +82,8 @@ def analyze_and_draw(
     frame_bgr: np.ndarray,
     fire_model,
     person_model,
-    proximity_px: int = 150
+    proximity_px: int = PROXIMITY_PX
 ) -> Tuple[np.ndarray, int, int, bool]:
-    """프레임을 받아 탐지/표시/경고여부 반환"""
     # 탐지
     fire_boxes: List[List[int]] = fire_detector.detect_fire(frame_bgr, fire_model) or []
     person_boxes: List[List[int]] = person_detector.detect_person(frame_bgr, person_model) or []
@@ -89,8 +95,7 @@ def analyze_and_draw(
             if iou_or_center_dist(fb, pb) <= proximity_px:
                 warning = True
                 break
-        if warning:
-            break
+        if warning: break
 
     # 그리기
     annotated = frame_bgr.copy()
@@ -103,7 +108,6 @@ def analyze_and_draw(
         cv2.putText(annotated, "PERSON", (x1, max(0, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 0), 2)
 
-    # 경고 표시
     if warning:
         h, w = annotated.shape[:2]
         cv2.rectangle(annotated, (0, 0), (w, 36), (0, 0, 255), -1)
@@ -117,38 +121,26 @@ def analyze_and_draw(
 # -----------------------------
 st.title("🔥 실시간 화재/인명 감지")
 
-# 사이드바: 모델 경로/옵션
-with st.sidebar:
-    st.header("모델 설정")
-    fire_pt_rel = st.text_input("화재 모델(.pt) 경로", value="fire2.pt")
-    person_pt_rel = st.text_input("사람 모델(.pt) 경로", value="yolov8n.pt")  # YOLOv8 예시
-    proximity_px = st.slider("위험 근접 거리(px)", 50, 500, 150)
-    st.caption("화재/사람 중심거리(px)가 이 값보다 가까우면 '경고'로 표시합니다.")
-
-# 절대경로 변환
-fire_pt = abs_path(fire_pt_rel)
-person_pt = abs_path(person_pt_rel)
-
-# 모델 로드
+# 모델 로드 (고정 경로)
 try:
     with st.spinner("AI 모델 로딩 중..."):
-        fire_model, person_model = load_models(fire_pt, person_pt)
+        fire_model, person_model = load_models(FIRE_PT, PERSON_PT)
     st.success("모델 로딩 완료 ✅")
 except Exception as e:
-    st.error("AI 모델 로딩 실패 ❌ .pt 경로나 환경을 확인하세요.")
+    st.error("AI 모델 로딩 실패 ❌ .pt 파일과 경로를 확인하세요.")
     st.exception(e)
     st.stop()
 
 st.divider()
 st.subheader("웹캠")
 
-# 리포트 상태
+# 상태 저장
 if "report_text" not in st.session_state:
     st.session_state.report_text = ""
 if "report_done" not in st.session_state:
     st.session_state.report_done = False
 
-# 최신 탐지 요약(사이드)
+# 상태 표시
 status_fire = st.empty()
 status_person = st.empty()
 status_warn = st.empty()
@@ -159,15 +151,15 @@ def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
     frm = cv2.flip(frm, 1)
 
     annotated, f_cnt, p_cnt, warn = analyze_and_draw(
-        frm, fire_model, person_model, proximity_px
+        frm, fire_model, person_model, PROXIMITY_PX
     )
 
-    # 사이드 상태 갱신
+    # 상태 갱신
     status_fire.metric("탐지된 화재", f_cnt)
     status_person.metric("탐지된 인원", p_cnt)
     status_warn.metric("근접 경고", "발생" if warn else "없음")
 
-    # 경고 처음 발생 시 리포트 1회 생성(규칙 기반, 과장 금지)
+    # 경고 처음 발생 시 리포트 1회 생성
     if warn and not st.session_state.report_done:
         st.session_state.report_text = rule_based_report(f_cnt, p_cnt, warn)
         st.session_state.report_done = True
@@ -194,6 +186,5 @@ if st.session_state.report_done and st.session_state.report_text:
         st.session_state.report_done = False
         st.rerun()
     if cols[1].button("근접 임계값 +20px"):
-        # 상황에 따라 민감도 조절
-        proximity_px_new = min(500, proximity_px + 20)
-        st.toast(f"근접 임계값을 {proximity_px} → {proximity_px_new}px 로 높였습니다.")
+        globals()["PROXIMITY_PX"] = min(500, PROXIMITY_PX + 20)
+        st.toast(f"임계값을 {PROXIMITY_PX-20} → {PROXIMITY_PX}px 로 변경했습니다.")
