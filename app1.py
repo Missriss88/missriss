@@ -43,7 +43,7 @@ st.sidebar.markdown("---")
 def load_models():
     """AI 모델을 로드하는 함수 (캐싱하여 성능 최적화)"""
     fire_model = fire_detector.load_fire_model('fire2.pt')
-    person_model = person_detector.load_person_model('yolov5s.pt')
+    person_model = person_detector.load_person_model('yolov8n.pt')
     return fire_model, person_model
 
 with st.spinner('AI 모델을 로딩 중입니다...'):
@@ -245,3 +245,4 @@ elif app_mode == "파일 업로드 및 분석":
                     report = generate_report(max_fire, max_person, is_any_warning, annotated_frame)
                     if report:
                         st.text_area("AI 생성 리포트", report, height=300)
+
