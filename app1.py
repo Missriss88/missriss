@@ -159,17 +159,17 @@ if app_mode == "실시간 웹캠 감지":
             
             # --- AI 리포트 생성 로직 (핵심 수정 부분) ---
             # 위험 상황이 발생했고, 아직 리포트가 생성되지 않았다면
-            if is_warning and not report_generated:
-                with st.spinner("⚠️ 위험 상황 감지! AI 리포트를 생성합니다..."):
-                    report = generate_report(f_count, p_count, is_warning, annotated_frame)
-                    if report:
+    if is_warning and not report_generated:
+        with st.spinner("⚠️ 위험 상황 감지! AI 리포트를 생성합니다..."):
+            report = generate_report(f_count, p_count, is_warning, annotated_frame)
+            if report:
                         # 리포트 표시 영역에 결과 출력
-                        report_placeholder.text_area("AI 생성 리포트", report, height=300)
-                        report_generated = True # 리포트 생성됨을 표시 (중복 방지)
+                report_placeholder.text_area("AI 생성 리포트", report, height=300)
+                report_generated = True # 리포트 생성됨을 표시 (중복 방지)
 
-        video_capture.release()
+    video_capture.release()
     else:
-        frame_placeholder.info("웹캠 실행 버튼을 켜서 감지를 시작하세요.")
+    frame_placeholder.info("웹캠 실행 버튼을 켜서 감지를 시작하세요.")
 
 # --- 모드 2: 파일 업로드 및 분석 ---
 elif app_mode == "파일 업로드 및 분석":
@@ -247,4 +247,5 @@ elif app_mode == "파일 업로드 및 분석":
                     report = generate_report(max_fire, max_person, is_any_warning, annotated_frame)
                     if report:
                         st.text_area("AI 생성 리포트", report, height=300)
+
 
