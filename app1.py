@@ -137,22 +137,33 @@ if app_mode == "실시간 웹캠 감지":
     if 'report_text' not in st.session_state:
         st.session_state.report_text = ""
 
+    # 웹캠 작동 문제 해결을 위한 디버깅 추가
     class VideoTransformer(VideoTransformerBase):
         def __init__(self):
             self.proximity_threshold = proximity_threshold
 
         def recv(self, frame):
-            frm = frame.to_ndarray(format="bgr24")
-            
-            annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frm, self.proximity_threshold)
-            
-            if is_warning and not st.session_state.report_generated:
-                report = generate_report(f_count, p_count, is_warning, annotated_frame)
-                if report:
-                    st.session_state.report_text = report
-                    st.session_state.report_generated = True
-            
-            return annotated_frame
+            if frame is None:  # 프레임이 None일 경우 오류 처리
+                st.error("웹캠에서 프레임을 수신하지 못했습니다. 카메라 권한을 확인하세요.")
+                return None
+            try:
+                frm = frame.to_ndarray(format="bgr24")
+                annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frm, self.proximity_threshold)
+                
+                if is_warning and not st.session_state.report_generated:
+                    report = generate_report(f_count, p_count, is_warning, annotated_frame)
+                    if report:
+                        st.session_state.report_text = report
+                        st.session_state.report_generated = True
+                
+                return annotated_frame
+            except Exception as e:
+                st.error(f"프레임 처리 중 오류 발생: {e}")
+                return None
+
+    # asyncio 이벤트 루프 초기화 추가 (웹캠 작동 문제 해결 시도)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     webrtc_streamer(
         key="webcam",
