@@ -1,8 +1,9 @@
+# requirements.txt
 streamlit
 ultralytics
 opencv-python-headless
 google-generativeai
 numpy
 Pillow
-streamlit-webrtc
+streamlit-webrtc==0.47.0
 av
