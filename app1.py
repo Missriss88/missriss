@@ -1,226 +1,247 @@
-# app.py
 import streamlit as st
 import cv2
-import numpy as np
-import toml
+import fire_detector
+import person_detector
 import google.generativeai as genai
-from PIL import Image
+import numpy as np
 import tempfile
-import time
-import math
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+from PIL import Image
 
-# 제공된 탐지 모듈 임포트
-from fire_detector import load_fire_model, detect_fire
-from person_detector import load_person_model, detect_person
+# --- 페이지 기본 설정 ---
+st.set_page_config(
+    page_title="AI 화재 및 인명 안전 시스템",
+    page_icon="🚨",
+    layout="wide",
+)
 
-# --- 초기 설정 및 모델 로딩 ---
+# --- 앱 제목 ---
+st.title("🚨 AI 화재 및 인명 감지 시스템(CCTV용 모델)")
+st.markdown("---")
 
-st.set_page_config(page_title="🔥 AI 화재 및 인명 안전 관제 시스템", layout="wide")
-st.title("🔥 AI 화재 및 인명 안전 관제 시스템")
-st.write("이미지, 동영상 또는 웹캠을 통해 화재와 사람을 감지하고 위험 상황 시 AI 분석 리포트를 생성합니다.")
+# --- 사이드바 설정 ---
+st.sidebar.title("⚙️ 제어판")
 
-# @st.cache_resource: Streamlit 앱의 성능 최적화를 위해 모델을 캐시에 저장
+# Gemini API 키 입력
+st.sidebar.header("탐지 모드")
+try:
+    # Try to get the key from Streamlit's secrets
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+except (KeyError, FileNotFoundError):
+    GOOGLE_API_KEY = st.sidebar.text_input(
+        "Google Gemini API 키를 입력하세요.", type="password", help="API 키가 없으면 리포트 생성이 불가합니다."
+    )
+
+# 작업 모드 선택
+app_mode = st.sidebar.selectbox(
+    "작업 모드를 선택하세요",
+    ["실시간 웹캠 감지", "파일 업로드 및 분석"]
+)
+st.sidebar.markdown("---")
+
+# --- 모델 로딩 ---
 @st.cache_resource
 def load_models():
-    """YOLO 모델들을 로드하고 캐시에 저장합니다."""
-    try:
-        fire_model = load_fire_model('fire2.pt')
-        person_model = load_person_model('yolov8n.pt')
-        return fire_model, person_model
-    except FileNotFoundError as e:
-        st.error(f"모델 파일 로딩 오류: {e}. 'fire2.pt'와 'yolov8n.pt' 파일이 프로젝트 폴더에 있는지 확인하세요.")
-        return None, None
+    """AI 모델을 로드하는 함수 (캐싱하여 성능 최적화)"""
+    fire_model = fire_detector.load_fire_model('fire2.pt')
+    person_model = person_detector.load_person_model('yolov5s.pt')
+    return fire_model, person_model
 
-fire_model, person_model = load_models()
+with st.spinner('AI 모델을 로딩 중입니다...'):
+    fire_model, person_model = load_models()
 
-# Google API 키 로드 및 Gemini 설정
-try:
-    GOOGLE_API_KEY = secrets.get("GOOGLE_API_KEY")
-    if not GOOGLE_API_KEY:
-        st.error("secret.toml 파일에서 Google API 키를 찾을 수 없습니다.")
-        st.stop()
-    genai.configure(api_key=GOOGLE_API_KEY)
-except FileNotFoundError:
-    st.error("'secret.toml' 파일을 찾을 수 없습니다. API 키를 설정해주세요.")
+if fire_model is None or person_model is None:
+    st.error("AI 모델 로딩에 실패했습니다. .pt 파일들을 확인해주세요.")
     st.stop()
 
-# --- 핵심 기능 함수 ---
+# --- 공통 함수: 프레임 분석 및 시각화 ---
+def analyze_and_draw_on_frame(frame, proximity_threshold):
+    """프레임 내에서 객체를 탐지하고 위험상황을 분석하여 시각화합니다."""
+    fire_boxes = fire_detector.detect_fire(frame, fire_model)
+    person_boxes = person_detector.detect_person(frame, person_model)
+    is_warning = False
 
-def is_near(person_box, fire_box, threshold):
-    """사람과 불의 바운딩 박스 중심점 사이의 거리를 계산하여 근접 여부를 판단합니다."""
-    px, py = (person_box[0] + person_box[2]) / 2, (person_box[1] + person_box[3]) / 2
-    fx, fy = (fire_box[0] + fire_box[2]) / 2, (fire_box[1] + fire_box[3]) / 2
-    distance = math.sqrt((px - fx)**2 + (py - fy)**2)
-    return distance < threshold
-
-def process_frame(frame, proximity_threshold):
-    """단일 프레임에 대해 화재 및 사람 감지, 위험 분석을 수행합니다."""
-    fire_boxes = detect_fire(frame, fire_model)
-    person_boxes = detect_person(frame, person_model)
-    
-    dangerous_persons = set()
-
-    # 위험 상황 분석
-    for i, p_box in enumerate(person_boxes):
+    if fire_boxes:
         for f_box in fire_boxes:
-            if is_near(p_box, f_box, proximity_threshold):
-                dangerous_persons.add(i)
-                break
+            cv2.rectangle(frame, (f_box[0], f_box[1]), (f_box[2], f_box[3]), (0, 0, 255), 3)
+            cv2.putText(frame, 'Fire', (f_box[0], f_box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+            for p_box in person_boxes:
+                fire_center_x = f_box[0] + (f_box[2] - f_box[0]) / 2
+                person_center_x = p_box[0] + (p_box[2] - p_box[0]) / 2
+                if abs(fire_center_x - person_center_x) < proximity_threshold:
+                    is_warning = True
+                    cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (0, 165, 255), 4)
+                else:
+                    cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (255, 0, 0), 2)
+                cv2.putText(frame, 'Person', (p_box[0], p_box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+    else:
+        for p_box in person_boxes:
+            cv2.rectangle(frame, (p_box[0], p_box[1]), (p_box[2], p_box[3]), (255, 0, 0), 2)
+            cv2.putText(frame, 'Person', (p_box[0], p_box[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-    # 시각화: 바운딩 박스 및 경고 그리기
-    for i, p_box in enumerate(person_boxes):
-        x1, y1, x2, y2 = p_box
-        if i in dangerous_persons:
-            # 위험에 처한 사람: 빨간색
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(frame, "DANGER", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-        else:
-            # 안전한 사람: 녹색
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, "Person", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
-    for f_box in fire_boxes:
-        x1, y1, x2, y2 = f_box
-        # 화재: 주황색
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
-        cv2.putText(frame, "FIRE", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 165, 255), 2)
-
-    # 화면 상단에 경고 메시지 표시
-    if dangerous_persons:
-        warning_text = f"WARNING: {len(dangerous_persons)} person(s) near fire!"
-        cv2.putText(frame, warning_text, (50, 50), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (0, 0, 255), 3)
+    if is_warning:
+        cv2.putText(frame, "WARNING: Person Near Fire!", (50, 60), cv2.FONT_HERSHEY_TRIPLEX, 1.5, (0, 255, 255), 3)
         
-    return frame, len(fire_boxes), len(person_boxes), len(dangerous_persons)
+    return frame, len(fire_boxes), len(person_boxes), is_warning
 
-
-def generate_ai_report(image, fire_count, person_count, danger_count):
-    """Gemini API를 사용하여 AI 분석 리포트를 생성합니다."""
-    st.info("AI 리포트를 생성 중입니다. 잠시만 기다려주세요...")
-    
-    model = genai.GenerativeModel('gemini-pro-vision')
-    
-    prompt = f"""
-    당신은 최첨단 재난 분석 시스템입니다. 아래 이미지는 실제 재난 상황을 시뮬레이션한 것입니다.
-    
-    분석 데이터:
-    - 탐지된 화재 수: {fire_count}
-    - 탐지된 사람 수: {person_count}
-    - 화재 근처 위험 인원 수: {danger_count}
-    
-    위 데이터와 이미지를 바탕으로 다음 항목에 대해 상세하고 전문적인 보고서를 작성해주세요:
-    1.  **상황 개요**: 현재 이미지에 나타난 상황을 객관적으로 요약합니다.
-    2.  **위험 평가**: 화재의 규모, 위험에 처한 사람의 수 등을 기반으로 현재 상황의 심각성을 평가합니다.
-    3.  **권장 조치**: 이 상황에서 즉시 취해야 할 행동(예: 대피 경로 안내, 소방서 신고, 특정 인물 우선 구조 등)을 구체적으로 제안합니다.
-    """
-    
-    pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    
+# --- 공통 함수: AI 리포트 생성 ---
+def generate_report(fire_count, person_count, is_warning, image_frame):
+    """탐지 결과를 바탕으로 Gemini AI 리포트를 생성합니다."""
+    if not GOOGLE_API_KEY:
+        st.error("Gemini API 키가 설정되지 않았습니다. 리포트를 생성할 수 없습니다.")
+        return None
     try:
-        response = model.generate_content([prompt, pil_image])
-        st.success("AI 리포트 생성 완료!")
+        genai.configure(api_key=GOOGLE_API_KEY)
+        
+        # PIL Image로 변환
+        pil_image = Image.fromarray(cv2.cvtColor(image_frame, cv2.COLOR_BGR2RGB))
+
+        # 리포트 생성을 위한 프롬프트 구성 (아래 2번에서 프롬프트 내용을 바꿀 예정)
+        prompt_parts = [
+    pil_image,
+    "당신은 CCTV 이미지를 분석하는 AI 안전 전문가입니다.",
+    "\n## 지시사항",
+    "첨부된 이미지와 아래 요약 데이터를 바탕으로 상황을 분석하고 안전 리포트를 작성하세요.",
+    
+    "\n## 분석 데이터",
+    f"- 화재 객체 수: {fire_count}",
+    f"- 사람 객체 수: {person_count}",
+    f"- 위험 경고 (사람-화재 근접): {'발생' if is_warning else '없음'}",
+
+    "\n## 분석 가이드라인",
+    "1.  **[상황 맥락 파악]** 이미지 속 불이 통제된 상황(예: 드럼통 안의 모닥불, 캠프파이어)인지, 통제되지 않은 위험한 화재(예: 건물 화재, 산불)인지 먼저 판단하세요. 주변 환경(실내/실외)과 사람들의 행동(불을 쬐는 중/대피 중)을 근거로 제시하세요.",
+    "2.  **[위험도 평가]** 위 맥락에 따라 위험도를 '안전', '주의', '경고', '심각' 4단계로 평가하고, 그 이유를 구체적으로 설명하세요. (예: '드럼통 내부의 통제된 불이며 주변에 인화물질이 없어 안전 단계임')",
+    "3.  **[권장 조치]** 평가된 위험도에 맞는 현실적인 조치를 1~2가지 제안하세요. 심각한 상황이 아니라면, '안전거리 유지', '소화기 위치 확인' 등 예방적 조치를 권고하세요. 과장된 경고는 피하세요.",
+    
+    "\n위 가이드라인에 따라 리포트를 생성해주세요."
+]
+        
+        # [권장] 멀티모달을 지원하는 최신 모델로 변경
+        model = genai.GenerativeModel('gemini-2.5-flash') 
+        response = model.generate_content(prompt_parts) # prompt가 아닌 prompt_parts를 전달
         return response.text
     except Exception as e:
         st.error(f"AI 리포트 생성 중 오류가 발생했습니다: {e}")
         return None
 
-# --- Streamlit UI 구성 ---
+# --- 모드 1: 실시간 웹캠 감지 ---
+if app_mode == "실시간 웹캠 감지":
+    st.header("실시간 웹캠 감지")
+    run_webcam = st.toggle("웹캠 실행", value=True)
+    proximity_threshold = st.slider(
+        "위험 근접 거리 설정 (px)", 50, 500, 150, 
+        help="화재와 사람 사이의 거리가 이 값보다 가까우면 위험으로 판단합니다."
+    )
+    
+    # --- UI 플레이스홀더 추가 ---
+    frame_placeholder = st.empty()
+    report_placeholder = st.empty() # AI 리포트를 표시할 공간
 
-# 사이드바 설정
-st.sidebar.title("⚙️ 설정")
-proximity_threshold = st.sidebar.slider("위험 감지 임계값 (거리)", 50, 500, 150, 10,
-                                        help="화재와 사람 사이의 거리가 이 값보다 가까우면 '위험'으로 판단합니다 (픽셀 단위).")
+    if run_webcam:
+        video_capture = cv2.VideoCapture(0)
+        
+        # --- 리포트 중복 생성을 막기 위한 상태 변수 ---
+        report_generated = False 
 
-input_method = st.sidebar.radio("입력 방식 선택", ('이미지 업로드', '동영상 업로드', '실시간 웹캠'))
-
-# AI 리포트 저장을 위한 세션 상태 초기화
-if 'ai_report' not in st.session_state:
-    st.session_state.ai_report = ""
-
-if fire_model is None or person_model is None:
-    st.warning("모델이 로드되지 않아 앱을 실행할 수 없습니다.")
-else:
-    if input_method == '이미지 업로드':
-        uploaded_file = st.file_uploader("이미지 파일을 선택하세요...", type=["jpg", "jpeg", "png"])
-        if uploaded_file is not None:
-            file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-            frame = cv2.imdecode(file_bytes, 1)
-
-            st.image(frame, channels="BGR", caption="원본 이미지")
+        while video_capture.isOpened():
+            success, frame = video_capture.read()
+            if not success:
+                st.error("웹캠을 열 수 없습니다.")
+                break
             
-            with st.spinner('이미지 분석 중...'):
-                processed_frame, fire_count, person_count, danger_count = process_frame(frame.copy(), proximity_threshold)
+            # 프레임 분석 및 결과 가져오기
+            annotated_frame, f_count, p_count, is_warning = analyze_and_draw_on_frame(frame, proximity_threshold)
             
-            st.image(processed_frame, channels="BGR", caption="분석 결과")
+            # 화면 업데이트
+            frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+            frame_placeholder.image(frame_rgb, caption="실시간 감지 중...",  use_container_width=True)
             
-            if st.button("AI 분석 리포트 생성"):
-                report = generate_ai_report(processed_frame, fire_count, person_count, danger_count)
-                st.session_state.ai_report = report
+            # --- AI 리포트 생성 로직 (핵심 수정 부분) ---
+            # 위험 상황이 발생했고, 아직 리포트가 생성되지 않았다면
+            if is_warning and not report_generated:
+                with st.spinner("⚠️ 위험 상황 감지! AI 리포트를 생성합니다..."):
+                    report = generate_report(f_count, p_count, is_warning, annotated_frame)
+                    if report:
+                        # 리포트 표시 영역에 결과 출력
+                        report_placeholder.text_area("AI 생성 리포트", report, height=300)
+                        report_generated = True # 리포트 생성됨을 표시 (중복 방지)
 
+        video_capture.release()
+    else:
+        frame_placeholder.info("웹캠 실행 버튼을 켜서 감지를 시작하세요.")
 
-    elif input_method == '동영상 업로드':
-        uploaded_file = st.file_uploader("동영상 파일을 선택하세요...", type=["mp4", "mov", "avi"])
-        if uploaded_file is not None:
-            tfile = tempfile.NamedTemporaryFile(delete=False)
+# --- 모드 2: 파일 업로드 및 분석 ---
+elif app_mode == "파일 업로드 및 분석":
+    st.header("파일 업로드 및 분석")
+    uploaded_file = st.file_uploader(
+        "이미지 또는 동영상 파일을 업로드하세요.",
+        type=["jpg", "jpeg", "png", "mp4", "mov", "avi"]
+    )
+    
+    if uploaded_file is not None:
+        file_type = uploaded_file.type.split('/')[0]
+        
+        # --- 이미지 파일 처리 ---
+        if file_type == "image":
+            image = Image.open(uploaded_file)
+            frame = np.array(image)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) # OpenCV 형식으로 변환
+
+            annotated_frame, f_count, p_count, warn = analyze_and_draw_on_frame(frame, 150)
+            
+            st.image(cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB), caption="분석된 이미지", use_container_width=True)
+            
+            st.markdown("---")
+            st.subheader("📋 분석 결과")
+            st.write(f"🔥 탐지된 화재: **{f_count}** 건")
+            st.write(f"👨‍👩‍👧‍👦 탐지된 인원: **{p_count}** 명")
+            st.warning("🚨 위험 상황(화재 근접 인원) 발생!" if warn else "✅ 위험 상황 없음.")
+            
+            if st.button("AI 안전 리포트 생성"):
+                with st.spinner("AI가 리포트를 작성 중입니다..."):
+                    report = generate_report(f_count, p_count, warn, annotated_frame)
+                    if report:
+                        st.text_area("AI 생성 리포트", report, height=300)
+
+        # --- 동영상 파일 처리 ---
+        elif file_type == "video":
+            tfile = tempfile.NamedTemporaryFile(delete=False) 
             tfile.write(uploaded_file.read())
             
-            cap = cv2.VideoCapture(tfile.name)
-            st_frame = st.empty()
+            video_capture = cv2.VideoCapture(tfile.name)
+            frame_placeholder = st.empty()
             
-            # AI 리포트 생성을 위한 프레임 캡쳐
-            report_capture_frame = None
+            total_frames = int(video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            progress_bar = st.progress(0)
+            
+            max_fire, max_person, is_any_warning = 0, 0, False
 
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
+            for i in range(total_frames):
+                success, frame = video_capture.read()
+                if not success:
                     break
                 
-                processed_frame, fire_count, person_count, danger_count = process_frame(frame.copy(), proximity_threshold)
-                st_frame.image(processed_frame, channels="BGR")
+                annotated_frame, f_count, p_count, warn = analyze_and_draw_on_frame(frame, 150)
                 
-                # 위험 상황 발생 시 첫 프레임을 리포트용으로 캡쳐
-                if danger_count > 0 and report_capture_frame is None:
-                    report_capture_frame = processed_frame.copy()
+                # 최대값 및 위험 상황 업데이트
+                max_fire = max(max_fire, f_count)
+                max_person = max(max_person, p_count)
+                if warn: is_any_warning = True
 
-            cap.release()
+                frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                frame_placeholder.image(frame_rgb, caption=f"동영상 분석 중... ({i+1}/{total_frames})", use_container_width=True)
+                progress_bar.progress((i + 1) / total_frames)
+
+            video_capture.release()
             
-            if report_capture_frame is not None:
-                st.warning("동영상에서 위험 상황이 감지되었습니다.")
-                if st.button("캡쳐된 위험 상황으로 AI 리포트 생성"):
-                     report = generate_ai_report(report_capture_frame, fire_count, person_count, danger_count)
-                     st.session_state.ai_report = report
-            else:
-                st.info("동영상 분석 완료. 감지된 위험 상황이 없습니다.")
+            st.success("동영상 분석이 완료되었습니다.")
+            st.markdown("---")
+            st.subheader("📋 전체 동영상 분석 요약")
+            st.write(f"🔥 탐지된 최대 화재 수: **{max_fire}** 건")
+            st.write(f"👨‍👩‍👧‍👦 탐지된 최대 인원 수: **{max_person}** 명")
+            st.warning("🚨 위험 상황(화재 근접 인원)이 한 번 이상 발생했습니다!" if is_any_warning else "✅ 전체 영상에서 위험 상황은 감지되지 않았습니다.")
 
-    elif input_method == '실시간 웹캠':
-        st.info("웹캠을 시작합니다. 브라우저에서 카메라 접근 권한을 허용해주세요.")
-
-        class VideoTransformer(VideoTransformerBase):
-            def __init__(self):
-                self.proximity_threshold = 150 # 초기값
-
-            def recv(self, frame):
-                img = frame.to_ndarray(format="bgr24")
-                
-                # 사이드바 값 실시간 반영 (이 부분이 의도대로 동작하지 않음)
-                self.proximity_threshold = proximity_threshold 
-                
-                processed_img, _, _, danger_count = process_frame(img, self.proximity_threshold)
-                
-                # 실시간 위험 경고
-                if danger_count > 0:
-                    cv2.putText(processed_img, "!! REAL-TIME DANGER !!", (50, 100), cv2.FONT_HERSHEY_TRIPLEX, 1.2, (0, 0, 255), 2)
-                
-                return processed_img
-        
-        webrtc_streamer(key="webcam", video_processor_factory=VideoTransformer)
-
-    # AI 리포트 출력 영역
-    if st.session_state.ai_report:
-        st.markdown("---")
-        st.subheader("🤖 AI 분석 리포트")
-        st.markdown(st.session_state.ai_report)
-        if st.button("리포트 초기화"):
-            st.session_state.ai_report = ""
-            st.rerun()
-
+            if st.button("AI 안전 리포트 생성"):
+                with st.spinner("AI가 리포트를 작성 중입니다..."):
+                    report = generate_report(max_fire, max_person, is_any_warning, annotated_frame)
+                    if report:
+                        st.text_area("AI 생성 리포트", report, height=300)
